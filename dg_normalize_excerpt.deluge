@@ -1,0 +1,366 @@
+string standalone.dg_normalize(String kind, String raw)
+{
+// =====================================================================
+// dg_normalize — EXCERPT / 抜粋（そのままでは完全版ではありません）
+// ---------------------------------------------------------------------
+// Source : dg_normalize.deluge (379 lines), normalization rule v1,
+//          from the "Zoho CRM duplicate-lead gateway" prototype.
+// Status : Built and tested in the author's own prototype Zoho CRM org
+//          (crm.zoho.jp, synthetic test data, 2026-11-12). NOT client work.
+// Scope  : This file shows only the core parts that explain the idea:
+//            - shared pre-processing (whitespace, full-width -> half-width)
+//            - email normalization (exact key + loose key)
+//            - phone / mobile normalization (extension split, JP default
+//              country, +E.164-style key, last-8-digit tail)
+//            - name key
+// OMITTED (marked "[省略 / OMITTED]" below):
+//            - the original header comment block (internal design notes)
+//            - the half-width katakana conversion tables (hkMap / comboMap)
+//            - the whole company-name section (legal-form stripping)
+//          Because the company section is omitted, kind = "company" falls
+//          through without a return in this excerpt. Use it as reading
+//          material, not as a drop-in function.
+// Comments inside the code are the original Japanese comments, lightly edited
+// for publication (references to the private design spec were removed).
+// Contains no personal data, credentials, org IDs or API keys.
+// ---------------------------------------------------------------------
+// 抜粋: 正規化関数 dg_normalize（379行）から、メール正規化・電話正規化・
+// 氏名キーと、その前提となる共通前処理だけを抜き出したもの。
+// 省略箇所: 元の冒頭コメント、半角カナ変換表、会社名セクション全体。
+// 試作組織での実装・検証であり、受注案件のコードではありません。
+// 純粋関数: CRM・外部へのアクセスは一切しない。
+// =====================================================================
+	// ---------- 設定 ----------
+	ruleVersion = 1;
+	// 1 回に処理する最大文字数（実装上の上限。CRM の1行テキスト項目は最大 255 文字なので CRM 由来の値は収まる）
+	maxChars = 300;
+	// 文字列リテラルでのエスケープを避けるため、バックスラッシュ・二重引用符・制御文字は URL デコードで作る
+	bs = zoho.encryption.urlDecode("%5C");
+	dq = zoho.encryption.urlDecode("%22");
+	tabChar = zoho.encryption.urlDecode("%09");
+	lfChar = zoho.encryption.urlDecode("%0A");
+	crChar = zoho.encryption.urlDecode("%0D");
+	kindName = ifnull(kind,"").trim().toLowerCase();
+	inStr = ifnull(raw,"");
+	res = Map();
+	res.put("kind",kindName);
+	res.put("version",ruleVersion);
+	res.put("key","");
+	res.put("loose","");
+	res.put("ext","");
+	res.put("tail","");
+	res.put("valid",false);
+	res.put("reason","");
+	if(kindName != "email" && kindName != "phone" && kindName != "mobile" && kindName != "name" && kindName != "company")
+	{
+		res.put("reason","BADKIND");
+		return res.toString();
+	}
+	// ---------- 手順: 空白類を半角空白へ寄せる（メール・電話の正規化の最初の手順） ----------
+	s1 = inStr.replaceAll(tabChar," ");
+	s1 = s1.replaceAll(lfChar," ");
+	s1 = s1.replaceAll(crChar," ");
+	s1 = s1.replaceAll("　"," ");
+	n = s1.length();
+	if(n > maxChars)
+	{
+		if(kindName == "email")
+		{
+			res.put("reason","R201");
+		}
+		else if(kindName == "phone" || kindName == "mobile")
+		{
+			res.put("reason","R211");
+		}
+		else
+		{
+			res.put("reason","TOOLONG");
+		}
+		return res.toString();
+	}
+	// ---------- 変換表（実装方法は「Map リテラル＋1文字ずつ参照」） ----------
+	// 全角英数記号 U+FF01〜U+FF5E → 半角。＂ と ＼ はリテラルでのエスケープを避けて下で put する。
+	// Map のキーが大文字小文字を区別しない実装だった場合も、email・name・company は後で小文字化し、phone は数字だけを使うので結果は変わらない。
+	fwMap = {"！":"!","＃":"#","＄":"$","％":"%","＆":"&","＇":"'","（":"(","）":")","＊":"*","＋":"+","，":",","－":"-","．":".","／":"/","０":"0","１":"1","２":"2","３":"3","４":"4","５":"5","６":"6","７":"7","８":"8","９":"9","：":":","；":";","＜":"<","＝":"=","＞":">","？":"?","＠":"@","Ａ":"A","Ｂ":"B","Ｃ":"C","Ｄ":"D","Ｅ":"E","Ｆ":"F","Ｇ":"G","Ｈ":"H","Ｉ":"I","Ｊ":"J","Ｋ":"K","Ｌ":"L","Ｍ":"M","Ｎ":"N","Ｏ":"O","Ｐ":"P","Ｑ":"Q","Ｒ":"R","Ｓ":"S","Ｔ":"T","Ｕ":"U","Ｖ":"V","Ｗ":"W","Ｘ":"X","Ｙ":"Y","Ｚ":"Z","［":"[","］":"]","＾":"^","＿":"_","｀":"`","ａ":"a","ｂ":"b","ｃ":"c","ｄ":"d","ｅ":"e","ｆ":"f","ｇ":"g","ｈ":"h","ｉ":"i","ｊ":"j","ｋ":"k","ｌ":"l","ｍ":"m","ｎ":"n","ｏ":"o","ｐ":"p","ｑ":"q","ｒ":"r","ｓ":"s","ｔ":"t","ｕ":"u","ｖ":"v","ｗ":"w","ｘ":"x","ｙ":"y","ｚ":"z","｛":"{","｜":"|","｝":"}","～":"~"};
+	fwMap.put("＂",dq);
+	fwMap.put("＼",bs);
+	// 半角カナ → 全角カナは氏名・会社名だけ
+	useKana = false;
+	if(kindName == "name" || kindName == "company")
+	{
+		useKana = true;
+	}
+	hkMap = Map();
+	comboMap = Map();
+	if(useKana)
+	{
+		// [省略 / OMITTED] hkMap: 半角カナ・半角記号 → 全角（63 項目）
+		// [省略 / OMITTED] comboMap: 濁点・半濁点付きの2文字組 → 全角1文字（26 項目、例 "ｶﾞ" → "ガ"）
+		// 濁点・半濁点は2文字で1文字になるので、先に2文字の組で引く
+	}
+	// ---------- 1文字ずつ変換（Deluge には while が無いので、固定長リストを for each で回し、処理が済んだら break で抜ける） ----------
+	padStr = "".leftPad(maxChars).replaceAll(" ","x,");
+	idxList = padStr.subString(0,padStr.length() - 1).toList();
+	outStr = "";
+	i = 0;
+	for each slot in idxList
+	{
+		if(i >= n)
+		{
+			break;
+		}
+		c = s1.subString(i,i + 1);
+		i = i + 1;
+		if(useKana && i < n)
+		{
+			pairStr = c + s1.subString(i,i + 1);
+			comboVal = comboMap.get(pairStr);
+			if(comboVal != null)
+			{
+				c = comboVal;
+				i = i + 1;
+			}
+		}
+		mapped = fwMap.get(c);
+		if(mapped == null && useKana)
+		{
+			mapped = hkMap.get(c);
+		}
+		if(mapped == null)
+		{
+			mapped = c;
+		}
+		if(useKana)
+		{
+			// 氏名・会社名: 空白をすべて除き、' と \ も除く
+			if(mapped != " " && mapped != "'" && mapped != bs)
+			{
+				outStr = outStr + mapped;
+			}
+		}
+		else
+		{
+			outStr = outStr + mapped;
+		}
+	}
+	s2 = outStr.trim();
+	// ==================== メール ====================
+	if(kindName == "email")
+	{
+		em = s2.toLowerCase();
+		if(em == "")
+		{
+			// 空値: キー空、理由コードなし（自己テストに空値のケースを含めて確認済み）
+			return res.toString();
+		}
+		// 危険文字 ' と \ はキーを作らない（R202）。COQL に埋め込まないことを優先して形式検査より先に見る
+		if(em.contains("'") || em.contains(bs))
+		{
+			res.put("reason","R202");
+			return res.toString();
+		}
+		atCount = em.length() - em.replaceAll("@","").length();
+		formatOk = true;
+		if(atCount != 1 || em.contains(" ") || em.length() > 255)
+		{
+			formatOk = false;
+		}
+		localPart = "";
+		domainPart = "";
+		if(formatOk)
+		{
+			// @ はちょうど1個なので、正規表現で前後に分ける（getPrefix 等の挙動差を避ける）
+			localPart = em.replaceAll("@.*$","");
+			domainPart = em.replaceAll("^[^@]*@","");
+			if(localPart == "" || domainPart == "")
+			{
+				formatOk = false;
+			}
+			else if(domainPart.contains(".") == false || domainPart.startsWith(".") || domainPart.endsWith(".") || domainPart.contains(".."))
+			{
+				formatOk = false;
+			}
+		}
+		if(formatOk == false)
+		{
+			res.put("reason","R201");
+			return res.toString();
+		}
+		res.put("key",em);
+		res.put("valid",true);
+		// あいまいキー: ローカル部の + 以降を除く（全ドメイン）。+ の前が空になる場合は除かない（仕様に記載なし、実装判断）
+		looseLocal = localPart;
+		plusCut = localPart.replaceAll("[+].*$","");
+		if(plusCut != "")
+		{
+			looseLocal = plusCut;
+		}
+		looseDomain = domainPart;
+		if(looseDomain == "gmail.com" || looseDomain == "googlemail.com")
+		{
+			looseLocal = looseLocal.replaceAll("[.]","");
+			looseDomain = "gmail.com";
+		}
+		res.put("loose",looseLocal + "@" + looseDomain);
+		return res.toString();
+	}
+	// ==================== 電話 ====================
+	if(kindName == "phone" || kindName == "mobile")
+	{
+		// 内線の印 ext・x の大文字小文字をそろえるため先に小文字にする（数字の判定には影響しない）
+		ph = s2.toLowerCase();
+		if(ph == "")
+		{
+			// 空値: キー空、理由コードなし（自己テストに空値のケースを含めて確認済み）
+			return res.toString();
+		}
+		// 手順2: 内線の分離。印の直前が数字（空白は許す）で、印の後ろが空白を除いて数字だけのときだけ内線とみなす
+		extVal = "";
+		markerList = {"内線","ext[.]","ext","x","#"};
+		for each rx in markerList
+		{
+			if(extVal == "" && ph.replaceAll(rx,"") != ph)
+			{
+				beforePart = ph.replaceAll(rx + ".*$","").trim();
+				afterPart = ph.replaceAll("^.*?" + rx,"").replaceAll(" ","");
+				lastCh = "";
+				bLen = beforePart.length();
+				if(bLen > 0)
+				{
+					lastCh = beforePart.subString(bLen - 1,bLen);
+				}
+				if(lastCh != "" && "0123456789".contains(lastCh) && afterPart != "" && afterPart.replaceAll("[0-9]","") == "")
+				{
+					extVal = afterPart;
+					ph = beforePart;
+				}
+			}
+		}
+		if(extVal != "")
+		{
+			if(kindName == "mobile")
+			{
+				res.put("ext","m:" + extVal);
+			}
+			else
+			{
+				res.put("ext",extVal);
+			}
+		}
+		// 手順3: 接頭語（TEL: 等）、ハイフン類（- ‐ − ー ―）、括弧、空白、ドットを除く
+		ph = ph.trim().replaceAll("^(tel|phone|電話番号|電話)[.:]?","");
+		ph = ph.replaceAll("[-‐−ー―(). ]","");
+		// 手順4: 先頭の + 1 個と数字以外を含めば不正（R211、Tail も作らない）
+		hasPlus = false;
+		digits = ph;
+		if(digits.startsWith("+"))
+		{
+			hasPlus = true;
+			digits = digits.subString(1,digits.length());
+		}
+		if(digits == "" || digits.replaceAll("[0-9]","") != "")
+		{
+			res.put("reason","R211");
+			return res.toString();
+		}
+		// 手順5: 先頭の形ごとの桁数規則（判定順は R211 → 先頭の形 → 桁数）。既定国は JP（試作では固定。本実装では組織変数）
+		dLen = digits.length();
+		keyDigits = "";
+		reasonCode = "";
+		if(hasPlus)
+		{
+			if(digits.startsWith("81"))
+			{
+				rest = digits.subString(2,dLen);
+				// +81 の直後の 0 を 1 個除く（+81(0)90… の誤記対策）
+				if(rest.startsWith("0"))
+				{
+					rest = rest.subString(1,rest.length());
+				}
+				restLen = rest.length();
+				if(restLen == 9 || restLen == 10)
+				{
+					keyDigits = "81" + rest;
+				}
+				else
+				{
+					reasonCode = "R212";
+				}
+			}
+			else
+			{
+				if(dLen >= 8 && dLen <= 15)
+				{
+					keyDigits = digits;
+				}
+				else
+				{
+					reasonCode = "R212";
+				}
+			}
+		}
+		else if(digits.startsWith("00") || digits.startsWith("010"))
+		{
+			// 国際プレフィックスの可能性: 確定キーを作らない
+			reasonCode = "R213";
+		}
+		else if(digits.startsWith("0"))
+		{
+			if(dLen == 10 || dLen == 11)
+			{
+				keyDigits = "81" + digits.subString(1,dLen);
+			}
+			else
+			{
+				reasonCode = "R212";
+			}
+		}
+		else
+		{
+			if(dLen >= 10 && dLen <= 15)
+			{
+				reasonCode = "R214";
+			}
+			else
+			{
+				reasonCode = "R212";
+			}
+		}
+		// 手順6: Tail（下位 8 桁）。確定キーがあればその数字から、無くても数字が 8 桁以上あれば元の数字から作る
+		tailSrc = digits;
+		if(keyDigits != "")
+		{
+			tailSrc = keyDigits;
+		}
+		tLen = tailSrc.length();
+		if(tLen >= 8)
+		{
+			res.put("tail",tailSrc.subString(tLen - 8,tLen));
+		}
+		if(keyDigits != "")
+		{
+			res.put("key","+" + keyDigits);
+			res.put("valid",true);
+		}
+		else
+		{
+			res.put("reason",reasonCode);
+		}
+		return res.toString();
+	}
+	// ==================== 氏名 ====================
+	// 呼び出し側で Last_Name と First_Name を連結してから渡す。空白・' ・\ は変換ループで除去済み
+	if(kindName == "name")
+	{
+		nameKey = s2.toLowerCase();
+		res.put("key",nameKey);
+		if(nameKey != "")
+		{
+			res.put("valid",true);
+		}
+		return res.toString();
+	}
+	// ==================== 会社名 ====================
+	// [省略 / OMITTED] 会社名キー: 氏名と同じ処理のあと、法人格の表記（株式会社・Inc. 等）を前後から除く。
+	// この抜粋では省略しているため、kind = "company" はここで戻り値なしになる。
+}
